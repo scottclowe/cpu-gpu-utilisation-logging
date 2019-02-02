@@ -22,6 +22,8 @@ log_gpu_cpu_stats --no-header -l 5 -n 60 compute_usage_log.csv
 
 --loop <INTERVAL>
 -l <INTERVAL>       Loop every INTERVAL seconds. Default is 1 second.
+                    A minimum of 0.5 is recommended, to get reliable CPU
+                    data.
 
 --niter <MAXITER>
 -n <MAXITER>        Repeat at most MAXITER times. Default is -1,
