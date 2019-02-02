@@ -306,7 +306,7 @@ while true; do
 
     # Fetch utilisation stats of each GPU
     gpu_csv="$(nvidia-smi \
-        --query-gpu=utilization.memory,utilization.gpu,temperature.gpu \
+        --query-gpu=utilization.gpu,utilization.memory,temperature.gpu \
         --format=csv,nounits,noheader)"
 
     #gpu_csv="${gpu_csv//NotSupported/NA}"
