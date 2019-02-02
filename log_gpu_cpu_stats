@@ -1,0 +1,347 @@
+#!/bin/sh
+
+# log_gpu_cpu_stats
+#   Logs GPU and CPU stats either to stdout, or to a CSV file.
+#   See usage below.
+
+# Copyright (c) 2019,  Scott C. Lowe <scott.code.lowe@gmail.com>
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are
+# met:
+#     * Redistributions of source code must retain the above copyright
+#       notice, this list of conditions and the following disclaimer.
+#     * Redistributions in binary form must reproduce the above copyright
+#       notice, this list of conditions and the following disclaimer in
+#       the documentation and/or other materials provided with the distribution
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+
+
+usage () {
+    cat <<HELP_USAGE
+  $(basename $0)
+  Logs GPU and CPU utilization, either to stdout or to a CSV file.
+
+  $(basename $0)  [OPTION1 [ARG1]] [OPTION2 [ARG2]] ... [FILE]
+
+  Usage:
+    $(basename $0)
+    $(basename $0) -l 10
+    $(basename $0) compute_usage_log.csv
+    $(basename $0) --no-header -l 5 -n 60 compute_usage_log.csv
+
+  Options:
+    -h, --help          Show usage and exit.
+
+    --loop <INTERVAL>
+    -l <INTERVAL>       Loop every INTERVAL seconds. Default is 1 second.
+
+    --niter <MAXITER>
+    -n <MAXITER>        Repeat at most MAXITER times. Default is -1,
+                        which corresponds to forever (send interrput signal
+                        to terminate).
+
+    -H, --no-header     Disable header in table output. Default is enabled.
+
+    --header            Enable header in table output. Default is enabled.
+
+    -c, --csv           Output in csv style. Default style is csv if FILE is
+                        set.
+
+    -t, --tabular       Output in ascii table style. Default style is tabular
+                        if FILE is not set (output is sent to stdout).
+
+    -I, --date-iso      Show time in ISO format. Default is seconds (-s flag).
+
+    -s, --date-seconds  Show time in seconds since Unix epoch (with ms
+                        precision reported). Enabled by default.
+
+    --date <FORMAT>
+    -d <FORMAT>         Show time in custom format, FORMAT.
+
+    [FILE]              If present, output is appended to FILE. If omitted,
+                        output is sent to stdout.
+
+  Implementation:
+    version     1.0.0
+    author      Scott C. Lowe
+    copyright   Scott C. Lowe
+    license     MIT
+HELP_USAGE
+}
+#
+# If no filename is supplied, output to stdout.
+# Default format is CSV if writing to file, and tabular if to stdout.
+# Default loop interval is 1 second.
+#
+# Requires: nvidia-smi, top, bc
+# Tested with bash and dash shells.
+
+
+# Default arguments
+loop_intv=1
+iter_limit=-1
+print_header=1
+csv_mode=-1
+fname=''
+DATE_FLAG_DEFAULT="+%s.%3N"
+date_flag="$DATE_FLAG_DEFAULT"
+
+# Handle arguments
+grab_loop=0
+grab_iter_limit=0
+
+while [ "$1" != "" ]; do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --header)
+            print_header=1
+            ;;
+        -H|--no-header)
+            print_header=0
+            ;;
+        -c|--csv)
+            csv_mode=1
+            ;;
+        -t|--tabular)
+            csv_mode=0
+            ;;
+        -I|--date-iso)
+            date_flag="-Iseconds"
+            ;;
+        -s|--date-seconds)
+            date_flag="$DATE_FLAG_DEFAULT"
+            ;;
+        -d|--date|--date-custom)
+            shift
+            date_flag="$1"
+            ;;
+        -l|--loop)
+            shift
+            loop_intv="$1"
+            ;;
+        -n|--niter)
+            shift
+            iter_limit="$1"
+            ;;
+        --)
+            break
+            ;;
+        -*)
+            echo "Unrecognised flag: $arg" >&2
+            exit 2
+            ;;
+        *)
+            fname="$arg"
+            ;;
+    esac
+    shift
+done
+
+if [ "$csv_mode" -eq -1 ]; then
+    if [ -n "$fname" ]; then
+        csv_mode=1
+    else
+        csv_mode=0
+    fi
+fi
+
+
+# We want to spend most of the delay time collecting CPU data with top.
+# I observed that the whole measurement routine takes 0.25s, so we account for
+# that (with an extra cushion) when setting the delay between top's batches.
+top_delay=$(printf "$loop_intv * 0.95 - 0.28\n" | bc)
+# Take max with 0 seconds, as we can't have negative delays
+top_delay=$(printf "if ($top_delay > 0) $top_delay else 0\n" | bc)
+# Take min with 5 seconds
+top_delay=$(printf "if ($top_delay < 5) $top_delay else 5\n" | bc)
+
+
+# Function to handle output to stdout or to file
+log() {
+    if [ -n "$fname" ]; then
+        printf '%s' "$@" >> "$fname"
+    else
+        printf '%s' "$@"
+    fi
+}
+log_newline() {
+    if [ -n "$fname" ]; then
+        printf '\n' >> "$fname"
+    else
+        printf '\n'
+    fi
+}
+
+
+if [ "$csv_mode" -eq 1 ]; then
+    # Format for printing table to csv file
+    cpu_print_format='%s,%s,%s,%s'
+    gpu_print_format=',%s'
+else
+    # Format for printing table to stdout
+    if [ $date_flag = "-Iseconds" ]; then
+        cpu_print_format='%26s'
+    else
+        cpu_print_format='%15s'
+    fi
+    cpu_print_format="$cpu_print_format ||%10s |%10s |%10s |"
+    gpu_print_format='|%10s '
+fi
+
+# Print the header
+if [ "$print_header" -eq 1 ]; then
+    
+    if [ $date_flag = "$DATE_FLAG_DEFAULT" ]; then
+        time_col_header="Timestamp (s)"
+    else
+        time_col_header="Time"
+    fi
+
+    log "$(printf "$cpu_print_format" \
+        "$time_col_header" \
+        "CPU (%)" \
+        "RAM (%)" \
+        "Swap (%)"\
+    )"
+
+    # Need to find out how many GPUs there are
+    gpulist="$(nvidia-smi -L)"
+    # Add a column for each field name, for each GPU
+    echo $gpulist | while read LINE; do
+        gpunum="$(echo "$LINE" | cut -d \  -f 2)"
+        log "$(printf "$gpu_print_format" \
+            "${gpunum}GPU (%)" "${gpunum}Mem (%)" "${gpunum}Temp (C)"\
+        )"
+        if [ "$csv_mode" -eq 0 ]; then
+            log "$(printf '%s' "|")"
+        fi
+    done
+    log_newline
+
+    if [ "$csv_mode" -eq 0 ]; then
+        # Lines below CPU section
+        if [ $date_flag = "-Iseconds" ]; then
+            log "$(printf '%s' "-----------")"
+        fi
+        log "$(printf '%s' "----------------++")"
+        log "$(printf '%s' "-----------+")"
+        log "$(printf '%s' "-----------+")"
+        log "$(printf '%s' "-----------+")"
+        # Lines below each GPU section
+        echo "$gpu_csv" | while read LINE; do
+            log "$(printf '%s' "+-----------")"
+            log "$(printf '%s' "+-----------")"
+            log "$(printf '%s' "+-----------")"
+            log "$(printf '%s' "+")"
+        done
+        log_newline
+    fi
+fi
+
+
+# Begin loop
+iter_count=0
+while true; do
+
+    start_time=$(date +%s.%N)
+
+    # Collect CPU stats using top.
+    # Supposedly, top is more accurate with 2 frames than with one, so we
+    # request two frames. We change the delay between them based on our own
+    # refresh interval.
+    otop=$(top -bn2 -d "$top_delay")F
+
+    # In each case here, we extract the relevant line from the output of top,
+    # using tail to take the last occurance of the n frames, and use sed to
+    # Take the value of interest to us.
+    cpu_idle="$(echo "$otop" \
+        | grep "Cpu(s)" \
+        | tail -1 \
+        | sed "s/.* \([0-9.]*\)%* id.*/\1/")"
+    cpu_use_perc="$(echo $cpu_idle | awk '{print 100 - $1}')"
+
+    ram_tot="$(echo "$otop" \
+        | grep "Mem.* used" \
+        | tail -1 \
+        | sed "s/.* \([0-9.]*\) total.*/\1/")"
+    ram_use="$(echo "$otop" \
+        | grep "Mem.* used" \
+        | tail -1 \
+        | sed "s/.* \([0-9.]*\) used.*/\1/")"
+    swap_tot="$(echo "$otop" \
+        | grep "Swap.* used" \
+        | tail -1 \
+        | sed "s/.* \([0-9.]*\) total.*/\1/")"
+    swap_use="$(echo "$otop" \
+        | grep "Swap.* used" \
+        | tail -1 \
+        | sed "s/.* \([0-9.]*\) used.*/\1/")"
+
+    # Use bc to calculate fraction of ram usage.
+    # The scale parameter controls number of decimal places.
+    ram_use_perc="$(echo "scale=1; 100 * $ram_use / $ram_tot" | bc)"
+    swap_use_perc="$(echo "scale=1; 100 * $swap_use / $swap_tot" | bc)"
+
+    # Print CPU stats to stdout or csvfile
+    log "$(printf "$cpu_print_format" \
+        $(date "$date_flag") "$cpu_use_perc" "$ram_use_perc" "$swap_use_perc")"
+
+    # Fetch utilisation stats of each GPU
+    gpu_csv="$(nvidia-smi \
+        --query-gpu=utilization.memory,utilization.gpu,temperature.gpu \
+        --format=csv,nounits,noheader)"
+
+    #gpu_csv="${gpu_csv//NotSupported/NA}"
+
+    # The CSV output from nvidia-smi has each GPU on its own line. We want to
+    # print them all on the same line, in the appropriate format.
+    echo $gpu_csv | while read LINE; do
+        log "$(printf "$gpu_print_format" \
+            $(echo "$LINE" \
+                | tr "," "\n" \
+                | tr -d ' ' \
+                | sed 's/\[*NotSupported\]*/N\/A/g' \
+            )\
+        )"
+        if [ "$csv_mode" -eq 0 ]; then
+            log "$(printf '%s' "|")"
+        fi
+    done
+
+    # Done recording this record, so add a new line.
+    log_newline
+
+    # Check how many records we have done, and stop if it is enough to meet
+    # our stopping criteria.
+    iter_count=$(( iter_count + 1 ))
+    if [ "$iter_limit" -gt 0 ] && [ "$iter_count" -ge "$iter_limit" ]; then
+        break
+    fi
+
+    # Sleep until it is time to begin the next measurement. We only sleep if
+    # we managed to do the measurement faster than the target cycle, of course!
+    sleep_dur=$(printf 'scale=3; 1 + %s - %s\n' "$start_time" "$(date +%s.%N)"\
+        | bc)
+
+    if [ "$(printf " %s > 0 \n" "$sleep_dur" | bc )" -eq 1 ]; then
+        sleep "$sleep_dur"
+    fi
+
+done
+
